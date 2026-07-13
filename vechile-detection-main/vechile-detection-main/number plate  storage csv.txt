@@ -1,0 +1,181 @@
+import cv2
+import numpy as np
+import matplotlib.pyplot as plt
+
+def center_handle(x, y, w, h):
+    x_center = int((x + x + w) / 2)
+    y_center = int((y + y + h) / 2)
+    return x_center, y_center
+
+# Open the video file
+cap = cv2.VideoCapture("video.mp4")
+if not cap.isOpened():
+    print("Error: Could not open video file.")
+    exit()
+
+# Counting line position and margin
+count_line_position = 550
+offset = 6  # Margin for counting
+
+# Minimum object dimensions for detection
+min_width_react = 80
+min_height_react = 80
+
+# Background subtractor
+algo = cv2.createBackgroundSubtractorMOG2()
+
+# Vehicle counter dictionary (only valid keys)
+counter = {"Car": 0, "Truck": 0, "Bike": 0}
+detected_vehicles = set()  # To prevent multiple counts for the same vehicle
+
+# Set up Matplotlib in interactive mode
+plt.ion()
+fig, ax = plt.subplots(figsize=(10, 6))
+# Initialize with a dummy image (will be updated immediately)
+dummy_image = np.zeros((480, 640, 3), dtype=np.uint8)
+image_display = ax.imshow(dummy_image)
+ax.axis("off")
+ax.set_title("Vehicle Detection")
+
+while cap.isOpened():
+    ret, frame1 = cap.read()
+    if not ret:
+        break
+
+    # Convert frame to grayscale and apply blur
+    grey = cv2.cvtColor(frame1, cv2.COLOR_BGR2GRAY)
+    blur = cv2.GaussianBlur(grey, (3, 3), 5)
+
+    # Apply background subtraction
+    img_sub = algo.apply(blur)
+
+    # Morphological transformations to clean up the image
+    dilat = cv2.dilate(img_sub, np.ones((5, 5), np.uint8))
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+    dilatada = cv2.morphologyEx(dilat, cv2.MORPH_CLOSE, kernel)
+    dilatada = cv2.morphologyEx(dilatada, cv2.MORPH_CLOSE, kernel)
+
+    # Find contours in the morphologically transformed image
+    counterShape, _ = cv2.findContours(dilatada, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    # Draw the counting line
+    cv2.line(frame1, (25, count_line_position), (1200, count_line_position), (255, 127, 0), 3)
+
+    for c in counterShape:
+        (x, y, w, h) = cv2.boundingRect(c)
+        # Only consider objects that meet the size criteria
+        if w < min_width_react or h < min_height_react:
+            continue
+
+        # Compute aspect ratio and determine vehicle type
+        aspect_ratio = float(w) / h
+        vehicle_type = None
+
+        if 1.0 < aspect_ratio < 2.0:
+            vehicle_type = "Car"
+        elif aspect_ratio >= 2.0:
+            vehicle_type = "Truck"
+        elif 0.5 <= aspect_ratio <= 1.0:
+            vehicle_type = "Bike"
+
+        # Draw bounding box and center for the detected vehicle
+        cv2.rectangle(frame1, (x, y), (x + w, y + h), (0, 255, 0), 2)
+        center = center_handle(x, y, w, h)
+        cv2.circle(frame1, center, 4, (0, 0, 255), -1)
+
+        # If a valid vehicle is classified, label and count it
+        if vehicle_type:
+            cv2.putText(frame1, vehicle_type, (x, y - 10), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
+
+            # Check if the vehicle has crossed the counting line
+            if count_line_position - offset < center[1] < count_line_position + offset:
+                if center not in detected_vehicles:
+                    counter[vehicle_type] += 1
+                    detected_vehicles.add(center)
+
+    # Convert the frame to RGB (Matplotlib uses RGB)
+    frame_rgb = cv2.cvtColor(frame1, cv2.COLOR_BGR2RGB)
+
+    # Update the Matplotlib image and title with counts
+    image_display.set_data(frame_rgb)
+    ax.set_title(f"Car: {counter['Car']} | Truck: {counter['Truck']} | Bike: {counter['Bike']}")
+    fig.canvas.draw()
+    fig.canvas.flush_events()
+
+# Clean up
+cap.release()
+plt.ioff()
+plt.show()  # Keeps the final frame displayed
+import cv2
+import numpy as np
+import easyocr
+import pandas as pd
+import os
+
+# Initialize the EasyOCR reader
+reader = easyocr.Reader(['en'])
+
+# Create/Open a CSV file for storing detected plates
+csv_filename = "number_plates.csv"
+if not os.path.exists(csv_filename):
+    df = pd.DataFrame(columns=["Plate Number"])
+    df.to_csv(csv_filename, index=False)
+
+# Open the video file
+cap = cv2.VideoCapture("video.mp4")
+if not cap.isOpened():
+    print("Error: Could not open video file.")
+    exit()
+
+# Load pre-trained Haar Cascade for number plate detection
+plate_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_russian_plate_number.xml")
+
+detected_plates = set()  # To avoid duplicate entries
+
+while cap.isOpened():
+    ret, frame = cap.read()
+    if not ret:
+        break
+
+    # Convert frame to grayscale for better detection
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+
+    # Detect number plates
+    plates = plate_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=4, minSize=(50, 50))
+
+    for (x, y, w, h) in plates:
+        plate_roi = frame[y:y + h, x:x + w]  # Extract the plate region
+
+        # Draw a rectangle around the detected plate
+        cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
+
+        # Use EasyOCR to recognize the text
+        plate_text = reader.readtext(plate_roi, detail=0)
+        
+        if plate_text:
+            plate_number = plate_text[0].strip()  # Get the first detected text
+            if plate_number not in detected_plates:  # Avoid duplicates
+                detected_plates.add(plate_number)
+
+                # Append to CSV file
+                df = pd.read_csv(csv_filename)
+                df = df.append({"Plate Number": plate_number}, ignore_index=True)
+                df.to_csv(csv_filename, index=False)
+
+                print(f"Detected Plate: {plate_number}")
+
+            # Display the detected plate number on the frame
+            cv2.putText(frame, plate_number, (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+
+    # Show the frame with detected plates
+    cv2.imshow("Number Plate Detection", frame)
+
+    if cv2.waitKey(1) & 0xFF == 13:  # Press 'Enter' to exit
+        break
+
+# Release video capture and close windows
+cap.release()
+cv2.destroyAllWindows()
+
+print(f"All detected plates saved to {csv_filename}")
